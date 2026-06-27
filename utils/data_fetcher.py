@@ -10,6 +10,7 @@ DataFetcher — pulls from all real-time public data sources:
 """
 
 import os
+import re
 import math
 import logging
 import time
@@ -35,9 +36,6 @@ SOCRATA_ENDPOINTS = {
     "seattle": "https://data.seattle.gov/resource/tazs-3rd5.json",
     "dallas": "https://www.dallasopendata.com/resource/qv6i-rri7.json",
     "austin": "https://data.austintexas.gov/resource/fdj4-gpfu.json",
-    "denver": "https://data.denvergov.org/resource/mnz9-vjy7.json",
-    "houston": "https://data.houstontx.gov/resource/kubn-qncu.json",
-    "boston": "https://data.boston.gov/resource/crime.json",
 }
 
 CITY_311_ENDPOINTS = {
@@ -45,8 +43,7 @@ CITY_311_ENDPOINTS = {
     "new york": "https://data.cityofnewyork.us/resource/erm2-nwe9.json",
     "san francisco": "https://data.sfgov.org/resource/vw6y-z8j6.json",
     "los angeles": "https://data.lacity.org/resource/rq3b-xjk8.json",
-    "seattle": "https://data.seattle.gov/resource/55dj-4iis.json",
-    "boston": "https://data.boston.gov/resource/wc8w-nujj.json",
+    "seattle": "https://data.seattle.gov/resource/5ngg-rpne.json",
 }
 
 HEADERS = {"User-Agent": "NeighborhoodAlert/1.0 (contact@neighborhoodalert.app)"}
@@ -64,6 +61,35 @@ CITY_POPULATIONS = {
     "boston":          670_000,
 }
 DEFAULT_POPULATION = 500_000
+
+# Severity weights for the Crime Index. Each weight is "how many baseline
+# incidents this type is worth" so that serious crime drives the score far more
+# than low-harm reports. Keys match the normalized `type` labels produced by
+# _fetch_socrata_crime(). Anything not listed falls back to SEVERITY_DEFAULT.
+SEVERITY_WEIGHTS = {
+    "Violent Crime":             10,
+    "Weapons Offense":            8,
+    "Theft & Burglary":           4,
+    "Vehicle Incident":           3,
+    "Drug Offense":               2,
+    "Fraud & Deception":          2,
+    "Property Damage/Vandalism":  2,
+    "Trespassing":                1,
+}
+SEVERITY_DEFAULT = 1
+
+# Absolute "serious-crime floor" points per incident (last 30 days). This makes
+# a meaningful raw count of serious crime register regardless of city size, so a
+# neighborhood with ~24 violent incidents/month can never read as "Low".
+VIOLENT_FLOOR_PTS  = 1.8   # Violent Crime + Weapons Offense
+PROPERTY_FLOOR_PTS = 0.5   # Theft & Burglary + Vehicle Incident
+
+# Per-capita scaling for the volume baseline (weighted incidents per 100k / 30d).
+CRIME_RATE_K = 1.0
+
+# Per-capita scaling for the FBI annual-totals fallback (incidents per 100k/yr).
+FBI_VIOLENT_K  = 0.06
+FBI_PROPERTY_K = 0.010
 
 STATE_ABBREVS = {
     "Alabama": "AL", "Alaska": "AK", "Arizona": "AZ", "Arkansas": "AR",
@@ -327,6 +353,15 @@ class DataFetcher:
             r = self._safe_get(url, params=params, headers=headers, timeout=12)
             r.raise_for_status()
             raw = r.json()
+            
+            # If the 30-day filter returned no data (often due to city data delays), fetch the latest available
+            if not raw and "$where" in params:
+                del params["$where"]
+                params["$limit"] = 100
+                r = self._safe_get(url, params=params, headers=headers, timeout=12)
+                r.raise_for_status()
+                raw = r.json()
+                
         except Exception as e:
             logger.warning("[Socrata:%s] crime fetch failed: %s", city_key, e)
             return []
@@ -342,7 +377,14 @@ class DataFetcher:
             raw_type = (
                 row.get("primary_type") or
                 row.get("ofns_desc") or
+                row.get("crm_cd_desc") or
                 row.get("crime_type") or
+                row.get("nibrs_crime") or
+                row.get("nibrs_crime_category") or
+                row.get("offense_sub_category") or
+                row.get("offense_parent_group") or
+                row.get("offense") or
+                row.get("offense_description") or
                 row.get("incident_type_primary") or
                 row.get("offense_type") or
                 row.get("highest_nibrs_ucr_offense_description") or
@@ -396,7 +438,7 @@ class DataFetcher:
             return {"note": f"No FBI state mapping for: {state_name!r}"}
         try:
             url = f"https://api.usa.gov/crime/fbi/cde/summarized/state/{state_abbr}/violent-crime"
-            r = self._safe_get(url, params={"API_KEY": FBI_API_KEY}, timeout=10)
+            r = self._safe_get(url, params={"API_KEY": FBI_API_KEY, "from": "01-2010", "to": "12-2023"}, timeout=10)
             r.raise_for_status()
             return r.json()
         except Exception as e:
@@ -494,7 +536,7 @@ class DataFetcher:
     def _fbi_agency_offense(self, ori: str, offense: str):
         try:
             url = f"{FBI_CDE_BASE}/summarized/agency/{ori}/{offense}"
-            r = self._safe_get(url, params={"API_KEY": FBI_API_KEY}, timeout=12)
+            r = self._safe_get(url, params={"API_KEY": FBI_API_KEY, "from": "01-2010", "to": "12-2023"}, timeout=12)
             r.raise_for_status()
             return self._cde_latest_total(r.json())
         except Exception as e:
@@ -503,36 +545,37 @@ class DataFetcher:
 
     @staticmethod
     def _cde_latest_total(payload):
-        candidates = []
-
-        def collect(series):
-            best = None
-            for yk, yv in series.items():
-                year = str(yk)[:4]
-                if not year.isdigit() or yv is None:
+        def year_sums(series):
+            sums = {}
+            for k, v in series.items():
+                if v is None:
+                    continue
+                m = re.search(r"(?:19|20)\d{2}", str(k))
+                if not m:
                     continue
                 try:
-                    value = int(float(yv))
+                    fv = float(v)
                 except (TypeError, ValueError):
                     continue
-                if best is None or year > best[0]:
-                    best = (year, value)
-            if best:
-                candidates.append((int(best[0]), best[1]))
+                y = int(m.group(0))
+                sums[y] = sums.get(y, 0.0) + fv
+            return sums
 
+        candidates = []
         if isinstance(payload, dict):
             offenses = payload.get("offenses")
             actuals = offenses.get("actuals") if isinstance(offenses, dict) else None
             if isinstance(actuals, dict):
                 for key, series in actuals.items():
-                    if "united states" in str(key).lower() or "national" in str(key).lower():
+                    kl = str(key).lower()
+                    if "united states" in kl or "national" in kl or "clearance" in kl:
                         continue
                     if isinstance(series, dict):
-                        collect(series)
+                        candidates.append((kl, series))
             if not candidates:
-                yearish = {k: v for k, v in payload.items() if str(k)[:4].isdigit()}
+                yearish = {k: v for k, v in payload.items() if re.search(r"(?:19|20)\d{2}", str(k))}
                 if yearish:
-                    collect(yearish)
+                    candidates.append(("", yearish))
         elif isinstance(payload, list):
             series = {}
             for row in payload:
@@ -547,12 +590,20 @@ class DataFetcher:
                 if year is not None and value is not None:
                     series[year] = value
             if series:
-                collect(series)
+                candidates.append(("", series))
 
-        if not candidates:
-            return None
-        candidates.sort()
-        return candidates[-1]
+        preferred = [c for c in candidates if "offense" in c[0]] or candidates
+
+        best = None
+        for _, series in preferred:
+            sums = year_sums(series)
+            if not sums:
+                continue
+            y = max(sums)
+            total = int(round(sums[y]))
+            if best is None or y > best[0] or (y == best[0] and total > best[1]):
+                best = (y, total)
+        return best
 
     @staticmethod
     def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -602,10 +653,10 @@ class DataFetcher:
         complaints = []
         for row in raw:
             complaints.append({
-                "category": row.get("type_of_service_request") or row.get("complaint_type") or row.get("service_name") or "Other",
-                "status": row.get("status") or row.get("resolution_action") or "Open",
-                "date": row.get("creation_date") or row.get("created_date") or row.get("requested_datetime") or "",
-                "address": row.get("street_address") or row.get("incident_address") or row.get("address") or "",
+                "category": row.get("type_of_service_request") or row.get("complaint_type") or row.get("service_name") or row.get("departmentname") or "Other",
+                "status": row.get("status") or row.get("resolution_action") or row.get("servicerequeststatusname") or "Open",
+                "date": row.get("creation_date") or row.get("created_date") or row.get("requested_datetime") or row.get("createddate") or "",
+                "address": row.get("street_address") or row.get("incident_address") or row.get("address") or row.get("zipcode") or "",
             })
         return complaints
 
@@ -645,12 +696,68 @@ class DataFetcher:
             return []
 
 
+    def _compute_crime_score(self, crime: Dict, pop_100k: float) -> int:
+        """Severity-weighted Crime Index (0-100).
+
+        Combines two signals and takes the worse of the two:
+          • a per-capita *volume* baseline, weighted by incident severity, so the
+            score stays comparable across cities of very different sizes; and
+          • an absolute *serious-crime floor* (violent + theft/burglary counts),
+            so a meaningful raw number of serious incidents always registers as
+            at least Moderate regardless of population.
+
+        When a city has no incident-level feed, falls back to FBI Crime Data
+        Explorer annual jurisdiction totals (previously these always scored 0).
+        """
+        type_counts = crime.get("type_counts") or {}
+        total_count = crime.get("total_count", 0)
+
+        if total_count:
+            weighted = sum(
+                c * SEVERITY_WEIGHTS.get(t, SEVERITY_DEFAULT)
+                for t, c in type_counts.items()
+            )
+            if weighted:
+                rate_score = (weighted / pop_100k) * CRIME_RATE_K
+            else:
+                # No per-type breakdown available — fall back to flat volume.
+                rate_score = (total_count / pop_100k) * 3.3
+            floor = self._serious_crime_floor(type_counts)
+            return min(100, int(max(rate_score, floor)))
+
+        return self._fbi_crime_score(crime.get("fbi_summary") or {}, pop_100k)
+
+    @staticmethod
+    def _serious_crime_floor(type_counts: Dict) -> float:
+        """Absolute points from serious incident counts over the last 30 days."""
+        violent = (
+            type_counts.get("Violent Crime", 0)
+            + type_counts.get("Weapons Offense", 0)
+        )
+        property_crime = (
+            type_counts.get("Theft & Burglary", 0)
+            + type_counts.get("Vehicle Incident", 0)
+        )
+        return violent * VIOLENT_FLOOR_PTS + property_crime * PROPERTY_FLOOR_PTS
+
+    @staticmethod
+    def _fbi_crime_score(summary: Dict, pop_100k: float) -> int:
+        """Per-capita Crime Index from FBI annual violent/property totals."""
+        v_year = summary.get("violent_crime") or 0
+        p_year = summary.get("property_crime") or 0
+        if not (v_year or p_year):
+            return 0
+        score = (
+            (v_year / pop_100k) * FBI_VIOLENT_K
+            + (p_year / pop_100k) * FBI_PROPERTY_K
+        )
+        return min(100, int(score))
+
     def _compute_risk(self, crime: Dict, weather: Dict, infra: Dict, quakes: List, city_key: str = "") -> Dict:
         population = CITY_POPULATIONS.get(city_key, DEFAULT_POPULATION)
         pop_100k = population / 100_000
 
-        crime_count = crime.get("total_count", 0)
-        crime_score = min(100, int((crime_count / pop_100k) * 3.3))
+        crime_score = self._compute_crime_score(crime, pop_100k)
         crime_label = self._score_label(crime_score)
 
         nws = weather.get("alerts", [])

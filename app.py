@@ -6,6 +6,8 @@ import streamlit as st
 import time
 
 from dotenv import load_dotenv
+load_dotenv()
+
 from utils.data_fetcher import DataFetcher
 from utils.ai_analyzer import AIAnalyzer
 from utils.orchestration import start_pipeline
@@ -24,7 +26,6 @@ from components.ui_components import (
     inject_custom_css,
 )
 
-load_dotenv()
 
 
 st.set_page_config(
@@ -102,7 +103,7 @@ def main():
             key="address_input",
         )
     with col_btn:
-        analyze = st.button("Analyze", type="primary", use_container_width=True)
+        analyze = st.button("Analyze", type="primary", width="stretch")
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown('<div class="chip-row">', unsafe_allow_html=True)
@@ -110,7 +111,7 @@ def main():
     chip_cols = st.columns(len(examples))
     for col, example in zip(chip_cols, examples):
         with col:
-            if st.button(example, key=f"chip_{example}", use_container_width=True):
+            if st.button(example, key=f"chip_{example}", width="stretch"):
                 address = example
                 analyze = True
     st.markdown('</div>', unsafe_allow_html=True)

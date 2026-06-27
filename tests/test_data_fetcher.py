@@ -120,14 +120,14 @@ class TestDetectCity:
     def test_austin(self):
         assert DataFetcher._detect_city("Austin", "Texas") == "austin"
 
-    def test_denver(self):
-        assert DataFetcher._detect_city("Denver", "Colorado") == "denver"
+    def test_denver_not_socrata_returns_empty(self):
+        assert DataFetcher._detect_city("Denver", "Colorado") == ""
 
-    def test_houston(self):
-        assert DataFetcher._detect_city("Houston", "Texas") == "houston"
+    def test_houston_not_socrata_returns_empty(self):
+        assert DataFetcher._detect_city("Houston", "Texas") == ""
 
-    def test_boston(self):
-        assert DataFetcher._detect_city("Boston", "Massachusetts") == "boston"
+    def test_boston_not_socrata_returns_empty(self):
+        assert DataFetcher._detect_city("Boston", "Massachusetts") == ""
 
     def test_unsupported_city_returns_empty(self):
         assert DataFetcher._detect_city("Springfield", "Illinois") == ""
@@ -234,6 +234,53 @@ class TestComputeRisk:
         risk = self.f._compute_risk(_make_crime(100), _make_weather(), _make_infra(0), [], "unknown_city")
         assert risk["crime_score"] == 66
         assert risk["crime_label"] == "High"
+
+
+    # --- Severity-weighted Crime Index (serious crime must register) ---
+
+    def test_violent_crime_floor_reaches_at_least_moderate(self):
+        # 24 violent incidents/month in a large city must not read as "Low".
+        crime = _make_crime(24, {"Violent Crime": 24})
+        risk = self.f._compute_risk(crime, _make_weather(), _make_infra(0), [], "chicago")
+        assert risk["crime_score"] >= 25
+        assert risk["crime_label"] in ("Moderate", "High", "Critical")
+
+    def test_violent_crime_outweighs_same_count_of_minor_incidents(self):
+        violent = self.f._compute_risk(
+            _make_crime(20, {"Violent Crime": 20}), _make_weather(), _make_infra(0), [], "chicago")
+        minor = self.f._compute_risk(
+            _make_crime(20, {"Trespassing": 20}), _make_weather(), _make_infra(0), [], "chicago")
+        assert violent["crime_score"] > minor["crime_score"]
+
+    def test_theft_and_burglary_contribute_to_floor(self):
+        crime = _make_crime(60, {"Theft & Burglary": 40, "Vehicle Incident": 20})
+        risk = self.f._compute_risk(crime, _make_weather(), _make_infra(0), [], "chicago")
+        assert risk["crime_score"] >= 25
+
+    def test_weighted_volume_beats_flat_count_for_severe_mix(self):
+        # Same total_count, but a violent-heavy mix scores higher than the
+        # severity-blind flat baseline would have.
+        severe = self.f._compute_risk(
+            _make_crime(100, {"Violent Crime": 60, "Theft & Burglary": 40}),
+            _make_weather(), _make_infra(0), [], "chicago")
+        assert severe["crime_score"] > 33  # flat 100/pop baseline ≈ 12
+
+    def test_fbi_summary_used_when_no_incident_feed(self):
+        # ~380 violent + ~1900 property per 100k/yr (US-average) in a default
+        # 500k-population jurisdiction → should land at least Moderate, not Low.
+        crime = {
+            "incidents": [], "total_count": 0, "type_counts": {},
+            "fbi_stats": {}, "period_days": 30,
+            "fbi_summary": {"violent_crime": 1900, "property_crime": 9500},
+        }
+        risk = self.f._compute_risk(crime, _make_weather(), _make_infra(0), [], "")
+        assert risk["crime_score"] >= 25
+        assert risk["crime_label"] != "Low"
+
+    def test_no_fbi_summary_and_no_incidents_scores_zero(self):
+        risk = self.f._compute_risk(_make_crime(0), _make_weather(), _make_infra(0), [], "chicago")
+        assert risk["crime_score"] == 0
+        assert risk["crime_label"] == "Low"
 
 
     def test_weather_extreme_alert_scores_100(self):
@@ -713,6 +760,19 @@ class TestFbiAgencyHelpers:
     def test_cde_latest_empty(self):
         assert DataFetcher._cde_latest_total({}) is None
         assert DataFetcher._cde_latest_total({"offenses": {"actuals": {}}}) is None
+
+    def test_cde_monthly_mm_yyyy_summed_per_year(self):
+        payload = {"offenses": {"actuals": {
+            "New York Offenses": {"11-2022": 100, "12-2022": 50, "01-2023": 10, "02-2023": 20},
+        }}}
+        assert DataFetcher._cde_latest_total(payload) == (2023, 30)
+
+    def test_cde_prefers_offenses_over_clearances(self):
+        payload = {"offenses": {"actuals": {
+            "New York Offenses": {"01-2023": 10, "02-2023": 20},
+            "New York Clearances": {"01-2023": 999, "02-2023": 999},
+        }}}
+        assert DataFetcher._cde_latest_total(payload) == (2023, 30)
 
 
 

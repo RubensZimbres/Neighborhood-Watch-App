@@ -932,7 +932,7 @@ def render_map_section(geo: Dict, crime_pts: List[Dict]):
     else:
         df = pd.DataFrame([{"lat": lat0, "lon": lon0}])
 
-    st.map(df, latitude="lat", longitude="lon", zoom=12, use_container_width=True)
+    st.map(df, latitude="lat", longitude="lon", zoom=12, width="stretch")
     st.markdown("</div>", unsafe_allow_html=True)
 
 

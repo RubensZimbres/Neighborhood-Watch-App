@@ -15,23 +15,32 @@ try:
 except ImportError:
     VERTEX_AVAILABLE = False
 
-GCP_PROJECT  = os.environ.get("GCP_PROJECT_NAME", "")
-GCP_LOCATION = os.environ.get("GCP_LOCATION", "us-central1")
-GEMINI_MODEL = "gemini-3.1-flash-preview"
+GEMINI_MODEL = "gemini-3.5-flash"
 
 
 class AIAnalyzer:
     def __init__(self):
         self._client = None
-        if VERTEX_AVAILABLE and GCP_PROJECT:
+        gcp_project = os.environ.get("GCP_PROJECT_NAME", "")
+        gcp_location = os.environ.get("GCP_LOCATION", "us-central1")
+        
+        if VERTEX_AVAILABLE and gcp_project:
             try:
                 self._client = genai.Client(
                     vertexai=True,
-                    project=GCP_PROJECT,
-                    location=GCP_LOCATION,
+                    project=gcp_project,
+                    location=gcp_location,
                 )
             except Exception as e:
                 print(f"[AIAnalyzer] Vertex AI init failed: {e}")
+
+        if not self._client:
+            api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY") or os.environ.get("GOOGLE_AI_API_KEY")
+            if api_key:
+                try:
+                    self._client = genai.Client(api_key=api_key)
+                except Exception as e:
+                    print(f"[AIAnalyzer] Gemini API Key init failed: {e}")
 
 
     def analyze(self, data: Dict, address: str) -> str:
@@ -120,7 +129,7 @@ Keep the entire response under 500 words.
         config = genai_types.GenerateContentConfig(
             temperature=0.4,
             top_p=0.9,
-            max_output_tokens=1024,
+            max_output_tokens=4096,
             response_modalities=["TEXT"],
             safety_settings=[
                 genai_types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH",       threshold="BLOCK_MEDIUM_AND_ABOVE"),

@@ -60,16 +60,16 @@ def _make_analyzer_with_client():
 
 
 class TestAIAnalyzerInit:
-    def test_no_gcp_project_client_is_none(self):
+    def test_no_gcp_project_no_api_key_client_is_none(self):
         with patch("utils.ai_analyzer.VERTEX_AVAILABLE", True), \
-             patch("utils.ai_analyzer.GCP_PROJECT", ""):
+             patch.dict(os.environ, {}, clear=True):
             from utils.ai_analyzer import AIAnalyzer
             analyzer = AIAnalyzer()
         assert analyzer._client is None
 
-    def test_vertex_unavailable_client_is_none(self):
+    def test_vertex_unavailable_no_api_key_client_is_none(self):
         with patch("utils.ai_analyzer.VERTEX_AVAILABLE", False), \
-             patch("utils.ai_analyzer.GCP_PROJECT", "test-project"):
+             patch.dict(os.environ, {"GCP_PROJECT_NAME": "test-project"}, clear=True):
             from utils.ai_analyzer import AIAnalyzer
             analyzer = AIAnalyzer()
         assert analyzer._client is None
@@ -78,16 +78,21 @@ class TestAIAnalyzerInit:
         mock_genai = MagicMock()
         mock_genai.Client.side_effect = Exception("Auth failed")
         with patch("utils.ai_analyzer.VERTEX_AVAILABLE", True), \
-             patch("utils.ai_analyzer.GCP_PROJECT", "test-project"), \
-             patch("utils.ai_analyzer.genai", mock_genai, create=True):
+             patch("utils.ai_analyzer.genai", mock_genai, create=True), \
+             patch.dict(os.environ, {"GCP_PROJECT_NAME": "test-project"}, clear=True):
             from utils.ai_analyzer import AIAnalyzer
-            analyzer = AIAnalyzer.__new__(AIAnalyzer)
-            analyzer._client = None
-            try:
-                AIAnalyzer.__init__(analyzer)
-            except Exception:
-                pass
+            analyzer = AIAnalyzer()
         assert analyzer._client is None
+
+    def test_api_key_fallback_constructs_client(self):
+        mock_genai = MagicMock()
+        with patch("utils.ai_analyzer.VERTEX_AVAILABLE", True), \
+             patch("utils.ai_analyzer.genai", mock_genai, create=True), \
+             patch.dict(os.environ, {"GOOGLE_AI_API_KEY": "k"}, clear=True):
+            from utils.ai_analyzer import AIAnalyzer
+            analyzer = AIAnalyzer()
+        assert analyzer._client is not None
+        mock_genai.Client.assert_called_once_with(api_key="k")
 
 
 
