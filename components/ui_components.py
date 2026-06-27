@@ -601,79 +601,102 @@ def inject_custom_css():
             font-weight: 500;
         }
 
-        /* ── Agent Orchestration Trace ───────────────────────────────────────── */
-        .agent-trace {
+        /* ── Agent Orchestration Map ─────────────────────────────────────────── */
+        .amap {
             background: var(--bg-card);
             border: 1px solid var(--border);
             border-radius: var(--radius-lg);
-            padding: 1.5rem;
+            padding: 1.5rem 1.5rem 1.9rem;
             margin-bottom: 1.5rem;
             box-shadow: 0 1px 3px rgba(15,23,42,0.03), 0 1px 2px rgba(15,23,42,0.05);
         }
-        .agent-trace-header {
-            display: flex;
-            align-items: center;
-            gap: 0.6rem;
-            margin-bottom: 1.2rem;
-            padding-bottom: 0.8rem;
-            border-bottom: 1px solid var(--border);
+        .amap-head { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.9rem; }
+        .amap-spark {
+            width: 26px; height: 26px; border-radius: 8px;
+            display: flex; align-items: center; justify-content: center;
+            background: linear-gradient(135deg, var(--green), var(--blue));
+            color: #fff; box-shadow: 0 2px 8px rgba(59,130,246,0.25);
         }
-        .agent-trace-title {
-            font-family: var(--font-display);
-            font-weight: 700;
-            font-size: 1rem;
-            color: var(--white);
+        .amap-spark svg { width: 15px; height: 15px; }
+        .amap-title { font-family: var(--font-display); font-weight: 700; font-size: 1rem; color: var(--white); }
+        .amap-counts { margin-left: auto; font-family: var(--font-mono); font-size: 0.8rem; color: var(--muted); }
+        .amap-counts b { color: var(--green-dim); font-weight: 700; }
+        .amap-bar { height: 8px; background: var(--bg-hover); border-radius: 99px; overflow: hidden; }
+        .amap-bar-fill {
+            height: 100%; border-radius: 99px;
+            background: linear-gradient(90deg, var(--green), var(--blue));
+            box-shadow: 0 0 10px rgba(16,185,129,0.45);
+            transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
         }
-        .agent-trace-sub {
-            font-family: var(--font-mono);
-            font-size: 0.7rem;
-            color: var(--muted);
-            margin-left: auto;
-            letter-spacing: 0.06em;
+        .amap-sub {
+            font-family: var(--font-mono); font-size: 0.68rem; color: var(--muted);
+            letter-spacing: 0.05em; margin: 0.5rem 0 1.4rem;
         }
-        .agent-row {
-            display: flex;
-            align-items: center;
-            gap: 0.8rem;
-            padding: 0.45rem 0;
-            font-family: var(--font-mono);
-            font-size: 0.8rem;
+        .amap-flow { display: flex; flex-direction: column; align-items: center; }
+        .amap-stage { display: flex; justify-content: center; flex-wrap: wrap; gap: 0.7rem; }
+        .amap-stage.parallel {
+            position: relative; padding: 1.1rem 0.9rem 0.9rem;
+            border: 1px dashed var(--border); border-radius: var(--radius-md);
+            background: rgba(59,130,246,0.018);
         }
-        .agent-row.depth-1 { padding-left: 1.6rem; }
-        .agent-row.depth-2 { padding-left: 3.2rem; }
-        .agent-tree { color: var(--muted); opacity: 0.6; }
-        .agent-name { color: var(--white); font-weight: 600; min-width: 120px; }
-        .agent-pill {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            padding: 2px 10px;
-            border-radius: 20px;
-            font-size: 0.65rem;
-            font-weight: 700;
-            letter-spacing: 0.08em;
-            text-transform: uppercase;
+        .amap-tag {
+            position: absolute; top: -9px; left: 50%; transform: translateX(-50%);
+            background: var(--bg-card); padding: 0 10px;
+            font-family: var(--font-mono); font-size: 0.58rem; letter-spacing: 0.14em;
+            text-transform: uppercase; color: var(--muted); white-space: nowrap;
         }
-        .agent-pill.queued  { background: var(--bg-hover); color: var(--muted); }
-        .agent-pill.running { background: var(--blue-bg);  color: var(--blue-dim); }
-        .agent-pill.done    { background: var(--green-bg); color: var(--green-dim); }
-        .agent-pill.failed  { background: var(--red-bg);   color: var(--red-dim); }
-        .agent-spin {
-            width: 10px; height: 10px;
-            border: 2px solid rgba(59,130,246,0.25);
-            border-top-color: var(--blue);
-            border-radius: 50%;
-            animation: spin 0.7s linear infinite;
+        .amap-link { width: 2px; height: 26px; border-radius: 2px; background: var(--border); }
+        .amap-link.is-done { background: var(--green); opacity: 0.45; }
+        .amap-link.is-active {
+            background: linear-gradient(180deg, var(--blue) 0%, rgba(59,130,246,0) 70%);
+            background-size: 100% 200%; animation: amapflow 1s linear infinite;
         }
-        .agent-elapsed {
-            margin-left: auto;
-            font-size: 0.7rem;
-            color: var(--muted);
+        @keyframes amapflow { 0% { background-position: 0 -26px; } 100% { background-position: 0 26px; } }
+        .amap-node {
+            display: flex; flex-direction: column; align-items: center; gap: 0.35rem;
+            width: 98px; padding: 0.6rem 0.3rem;
+            border: 1px solid var(--border); border-radius: var(--radius-md);
+            background: var(--bg-panel); transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
         }
-        .agent-err {
-            color: var(--red-dim);
-            font-size: 0.7rem;
-            font-style: italic;
+        .amap-node:hover { transform: translateY(-3px); box-shadow: 0 10px 18px rgba(15,23,42,0.08); border-color: var(--border-glow); }
+        .amap-ico-wrap { position: relative; }
+        .amap-ico {
+            width: 40px; height: 40px; border-radius: 50%;
+            display: flex; align-items: center; justify-content: center;
+            border: 2px solid var(--border); color: var(--muted);
+            background: var(--bg-card); transition: all 0.3s;
+        }
+        .amap-ico svg { width: 21px; height: 21px; }
+        .amap-badge {
+            position: absolute; right: -3px; bottom: -3px;
+            width: 16px; height: 16px; border-radius: 50%;
+            display: flex; align-items: center; justify-content: center;
+            border: 2px solid var(--bg-panel); color: #fff;
+        }
+        .amap-badge svg { width: 9px; height: 9px; }
+        .amap-spin2 {
+            width: 8px; height: 8px; border: 2px solid rgba(255,255,255,0.55);
+            border-top-color: #fff; border-radius: 50%; animation: spin 0.7s linear infinite;
+        }
+        .amap-name { font-size: 0.72rem; font-weight: 600; color: var(--white); text-align: center; line-height: 1.15; }
+        .amap-status { font-family: var(--font-mono); font-size: 0.56rem; letter-spacing: 0.08em; text-transform: uppercase; font-weight: 700; color: var(--muted); }
+        .amap-time { font-family: var(--font-mono); font-size: 0.6rem; color: var(--muted); min-height: 0.8rem; }
+        .amap-err { font-size: 0.58rem; color: var(--red-dim); text-align: center; line-height: 1.2; }
+        .amap-node.is-queued { opacity: 0.65; }
+        .amap-node.is-running { border-color: var(--blue); }
+        .amap-node.is-running .amap-ico { border-color: var(--blue); color: var(--blue-dim); animation: amapring 1.5s ease-in-out infinite; }
+        .amap-node.is-running .amap-status { color: var(--blue-dim); }
+        .amap-node.is-running .amap-badge { background: var(--blue); }
+        .amap-node.is-done .amap-ico { border-color: var(--green); color: var(--green-dim); background: var(--green-bg); }
+        .amap-node.is-done .amap-status { color: var(--green-dim); }
+        .amap-node.is-done .amap-badge { background: var(--green); }
+        .amap-node.is-failed { border-color: rgba(239,68,68,0.4); }
+        .amap-node.is-failed .amap-ico { border-color: var(--red); color: var(--red-dim); background: var(--red-bg); }
+        .amap-node.is-failed .amap-status { color: var(--red-dim); }
+        .amap-node.is-failed .amap-badge { background: var(--red); }
+        @keyframes amapring {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(59,130,246,0.4); }
+            50%      { box-shadow: 0 0 0 7px rgba(59,130,246,0); }
         }
 
         /* ── Landing Hero ────────────────────────────────────────────────────── */
@@ -1142,22 +1165,42 @@ _AGENT_LABELS = {
     "weather": "Weather",
     "nws": "NWS Alerts",
     "crime": "Crime",
-    "infra": "311 Infrastructure",
+    "infra": "311 Infra",
     "earthquakes": "Seismic",
     "risk": "Risk Scoring",
     "ai_briefing": "AI Briefing",
 }
 
-_AGENT_PILL = {
-    "queued":  ("queued",  "•"),
-    "running": ("running", '<span class="agent-spin"></span>'),
-    "done":    ("done",    ""),
-    "failed":  ("failed",  ""),
+
+def _svg(inner: str) -> str:
+    return (
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+        f'stroke-linecap="round" stroke-linejoin="round">{inner}</svg>'
+    )
+
+
+_AGENT_ICONS = {
+    "geocode": _svg('<path d="M12 21s-6-5.3-6-10a6 6 0 1 1 12 0c0 4.7-6 10-6 10z"/><circle cx="12" cy="11" r="2.3"/>'),
+    "weather": _svg('<path d="M7 18a4 4 0 0 1 .6-8 5 5 0 0 1 9.5 1.3A3.5 3.5 0 0 1 17 18H7z"/>'),
+    "nws": _svg('<path d="M12 4l9 16H3z"/><line x1="12" y1="10" x2="12" y2="14"/><circle cx="12" cy="17" r="0.6" fill="currentColor"/>'),
+    "crime": _svg('<path d="M12 3l7 3v5c0 4.5-3 7.6-7 9-4-1.4-7-4.5-7-9V6z"/>'),
+    "infra": _svg('<path d="M5 8l7-4 7 4"/><rect x="6" y="8" width="12" height="12" rx="1"/><path d="M10 20v-4h4v4"/>'),
+    "earthquakes": _svg('<path d="M3 12h3l2-6 4 12 2-6h7"/>'),
+    "risk": _svg('<path d="M5 18a7 7 0 1 1 14 0"/><line x1="12" y1="16" x2="15.5" y2="11.5"/>'),
+    "ai_briefing": _svg('<path d="M12 3l1.7 4.3L18 9l-4.3 1.7L12 15l-1.7-4.3L6 9l4.3-1.7z"/><circle cx="18.5" cy="5.5" r="1" fill="currentColor"/>'),
 }
+_DEFAULT_ICON = _svg('<circle cx="12" cy="12" r="7"/>')
+
+_BADGE = {
+    "done": _svg('<path d="M5 13l4 4 10-11"/>'),
+    "failed": _svg('<path d="M6 6l12 12M18 6L6 18"/>'),
+    "running": '<span class="amap-spin2"></span>',
+}
+
+_SPARK = _svg('<path d="M12 3l1.7 4.3L18 9l-4.3 1.7L12 15l-1.7-4.3L6 9l4.3-1.7z"/>')
 
 
 def _agent_depth(name: str, deps_map: Dict[str, List[str]], _cache: Dict[str, int]) -> int:
-    """Longest-path depth of a node in the DAG (capped at 2 for indentation)."""
     if name in _cache:
         return _cache[name]
     deps = deps_map.get(name, [])
@@ -1166,60 +1209,99 @@ def _agent_depth(name: str, deps_map: Dict[str, List[str]], _cache: Dict[str, in
     return depth
 
 
-def render_agent_trace(rows: List[Dict]):
-    """Render the live multi-agent orchestration DAG (one row per subagent).
+def _fmt_elapsed(ms) -> str:
+    if ms is None:
+        return ""
+    if ms < 1000:
+        return f"{ms} ms"
+    return f"{ms / 1000:.1f}s"
 
-    `rows` is the plain-dict list from orchestration.ProgressBoard.snapshot():
-    each has name / deps / status / elapsed_ms / error.
-    """
+
+def _agent_node_html(row: Dict) -> str:
+    name = row.get("name", "")
+    status = row.get("status", "queued")
+    if status not in ("queued", "running", "done", "failed"):
+        status = "queued"
+    label = _AGENT_LABELS.get(name, name.replace("_", " ").title())
+    icon = _AGENT_ICONS.get(name, _DEFAULT_ICON)
+    badge = f'<span class="amap-badge">{_BADGE[status]}</span>' if status in _BADGE else ""
+    err = row.get("error")
+    if status == "failed" and err:
+        meta = f'<div class="amap-err">{_esc(err[:48])}</div>'
+    else:
+        meta = f'<div class="amap-time">{_esc(_fmt_elapsed(row.get("elapsed_ms")))}</div>'
+    return (
+        f'<div class="amap-node is-{status}">'
+        f'<div class="amap-ico-wrap"><div class="amap-ico">{icon}</div>{badge}</div>'
+        f'<div class="amap-name">{_esc(label)}</div>'
+        f'<div class="amap-status">{_esc(status)}</div>'
+        f'{meta}'
+        '</div>'
+    )
+
+
+def _link_state(prev_stage: List[Dict], cur_stage: List[Dict]) -> str:
+    cur = [n.get("status") for n in cur_stage]
+    if cur and all(s == "done" for s in cur):
+        return "is-done"
+    prev_done = bool(prev_stage) and all(n.get("status") == "done" for n in prev_stage)
+    if any(s == "running" for s in cur) or (prev_done and any(s in ("queued", "running") for s in cur)):
+        return "is-active"
+    return ""
+
+
+def render_agent_trace(rows: List[Dict]):
     if not rows:
         rows = []
 
     deps_map = {r["name"]: r.get("deps", []) for r in rows}
     depth_cache: Dict[str, int] = {}
-    done = sum(1 for r in rows if r.get("status") == "done")
 
-    st.markdown('<div class="agent-trace">', unsafe_allow_html=True)
-    st.markdown(
-        f"""
-        <div class="agent-trace-header">
-            <span style="font-size:1.1rem"></span>
-            <span class="agent-trace-title">Agent Orchestration</span>
-            <span class="agent-trace-sub">{_esc(done)}/{_esc(len(rows))} subagents complete</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
+    stages: Dict[int, List[Dict]] = {}
     for r in rows:
-        name = r.get("name", "")
-        status = r.get("status", "queued")
-        pill_cls, glyph = _AGENT_PILL.get(status, ("queued", "•"))
-        label = _AGENT_LABELS.get(name, name.replace("_", " ").title())
-        depth = min(_agent_depth(name, deps_map, depth_cache), 2)
-        elapsed = r.get("elapsed_ms")
-        elapsed_html = (
-            f'<span class="agent-elapsed">{_esc(elapsed)} ms</span>'
-            if elapsed is not None else '<span class="agent-elapsed"></span>'
-        )
-        err = r.get("error")
-        err_html = f'<span class="agent-err">· {_esc(err[:60])}</span>' if err else ""
-        tree = '<span class="agent-tree">└─</span>' if depth else ""
+        d = _agent_depth(r.get("name", ""), deps_map, depth_cache)
+        stages.setdefault(d, []).append(r)
+    ordered = [stages[d] for d in sorted(stages)]
 
-        st.markdown(
-            f"""
-            <div class="agent-row depth-{depth}">
-                {tree}
-                <span class="agent-name">{_esc(label)}</span>
-                <span class="agent-pill {pill_cls}">{(glyph + " ") if glyph else ""}{_esc(status)}</span>
-                {err_html}
-                {elapsed_html}
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    total = len(rows)
+    done = sum(1 for r in rows if r.get("status") == "done")
+    running = next((r for r in rows if r.get("status") == "running"), None)
+    failed = sum(1 for r in rows if r.get("status") == "failed")
+    pct = round(done / total * 100) if total else 0
 
-    st.markdown("</div>", unsafe_allow_html=True)
+    if running:
+        sub = f'{pct}% · running {_esc(_AGENT_LABELS.get(running.get("name", ""), running.get("name", "")))}'
+    elif total and done + failed == total:
+        sub = "Pipeline complete" + (f' · {failed} degraded' if failed else "")
+    else:
+        sub = f"{pct}% complete"
+
+    parts = [
+        '<div class="amap">',
+        '<div class="amap-head">'
+        f'<span class="amap-spark">{_SPARK}</span>'
+        '<span class="amap-title">Agent Orchestration</span>'
+        f'<span class="amap-counts"><b>{_esc(done)}</b>/{_esc(total)} agents</span>'
+        '</div>',
+        f'<div class="amap-bar"><div class="amap-bar-fill" style="width:{pct}%"></div></div>',
+        f'<div class="amap-sub">{sub}</div>',
+        '<div class="amap-flow">',
+    ]
+
+    prev_stage = None
+    for stage in ordered:
+        if prev_stage is not None:
+            parts.append(f'<div class="amap-link {_link_state(prev_stage, stage)}"></div>')
+        parallel = len(stage) > 1
+        cls = "amap-stage parallel" if parallel else "amap-stage"
+        tag = f'<span class="amap-tag">{len(stage)} parallel agents</span>' if parallel else ""
+        nodes = "".join(_agent_node_html(r) for r in stage)
+        parts.append(f'<div class="{cls}">{tag}{nodes}</div>')
+        prev_stage = stage
+
+    parts.append("</div>")
+    parts.append("</div>")
+    st.markdown("".join(parts), unsafe_allow_html=True)
 
 
 

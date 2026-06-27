@@ -17,7 +17,7 @@ except ImportError:
 
 GCP_PROJECT  = os.environ.get("GCP_PROJECT_NAME", "")
 GCP_LOCATION = os.environ.get("GCP_LOCATION", "us-central1")
-GEMINI_MODEL = "gemini-2.0-flash-001"
+GEMINI_MODEL = "gemini-3.1-flash-preview"
 
 
 class AIAnalyzer:
@@ -132,7 +132,7 @@ Keep the entire response under 500 words.
         contents = [
             genai_types.Content(
                 role="user",
-                parts=[genai_types.Part.from_text(prompt)]
+                parts=[genai_types.Part.from_text(text=prompt)]
             )
         ]
         try:

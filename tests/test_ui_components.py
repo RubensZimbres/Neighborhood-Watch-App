@@ -101,3 +101,77 @@ class TestSafeGet:
         result = DataFetcher._safe_get("http://example.com", retries=1)
         assert result.status_code == 404
         assert mock_get.call_count == 1
+
+
+
+class TestRenderAgentTrace:
+    def _render(self, rows):
+        import components.ui_components as ui
+        captured = []
+        with patch.object(ui, "st") as mock_st:
+            mock_st.markdown.side_effect = lambda html, **k: captured.append(html)
+            ui.render_agent_trace(rows)
+        return captured
+
+    def test_single_markdown_call_no_newlines(self):
+        rows = [
+            {"name": "geocode", "deps": [], "status": "done", "elapsed_ms": 5, "error": None},
+            {"name": "weather", "deps": ["geocode"], "status": "done", "elapsed_ms": 0, "error": None},
+        ]
+        calls = self._render(rows)
+        assert len(calls) == 1
+        assert "\n" not in calls[0]
+
+    def test_emits_expected_structure(self):
+        rows = [{"name": "geocode", "deps": [], "status": "done", "elapsed_ms": 5, "error": None}]
+        html = self._render(rows)[0]
+        assert html.startswith('<div class="amap">')
+        assert html.endswith("</div>")
+        assert '<div class="amap-name">Geocode</div>' in html
+        assert "<b>1</b>/1 agents" in html
+        assert '<div class="amap-bar-fill" style="width:100%"></div>' in html
+
+    def test_stages_grouped_with_parallel_fanout(self):
+        rows = [
+            {"name": "geocode", "deps": [], "status": "done", "elapsed_ms": 5, "error": None},
+            {"name": "weather", "deps": ["geocode"], "status": "done", "elapsed_ms": 1, "error": None},
+            {"name": "crime", "deps": ["geocode"], "status": "done", "elapsed_ms": 1, "error": None},
+            {"name": "risk", "deps": ["geocode", "weather", "crime"], "status": "running",
+             "elapsed_ms": None, "error": None},
+        ]
+        html = self._render(rows)[0]
+        assert "amap-stage parallel" in html
+        assert "2 parallel agents" in html
+        assert "amap-link" in html
+
+    def test_running_shows_spinner_failed_shows_error(self):
+        rows = [
+            {"name": "risk", "deps": ["geocode"], "status": "running", "elapsed_ms": None, "error": None},
+            {"name": "crime", "deps": ["geocode"], "status": "failed", "elapsed_ms": 9, "error": "feed down"},
+        ]
+        html = self._render(rows)[0]
+        assert "amap-node is-running" in html
+        assert '<span class="amap-spin2"></span>' in html
+        assert "amap-node is-failed" in html
+        assert 'class="amap-err"' in html and "feed down" in html
+
+    def test_error_text_is_escaped(self):
+        rows = [{"name": "crime", "deps": ["geocode"], "status": "failed",
+                 "elapsed_ms": 1, "error": "<script>x</script>"}]
+        html = self._render(rows)[0]
+        assert "<script>x</script>" not in html
+        assert "&lt;script&gt;" in html
+
+    def test_elapsed_formatting(self):
+        rows = [
+            {"name": "geocode", "deps": [], "status": "done", "elapsed_ms": 5, "error": None},
+            {"name": "weather", "deps": ["geocode"], "status": "done", "elapsed_ms": 1500, "error": None},
+        ]
+        html = self._render(rows)[0]
+        assert "5 ms" in html
+        assert "1.5s" in html
+
+    def test_empty_rows_safe(self):
+        calls = self._render([])
+        assert len(calls) == 1
+        assert "<b>0</b>/0 agents" in calls[0]
