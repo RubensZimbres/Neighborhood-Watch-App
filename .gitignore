@@ -1,0 +1,8 @@
+.env
+venv/
+.env.example
+.streamlit/
+.ruff_cache/
+.pytest_cache/
+.benchmarks/
+__pycache__/
