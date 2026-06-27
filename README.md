@@ -120,15 +120,37 @@ components:
 
 | Component | Weight | Method |
 |---|---|---|
-| Crime | 45% | Per-capita incident rate (incidents per 100k residents, 30-day window) |
+| Crime | 45% | Severity-weighted incident rate with an absolute serious-crime floor (30-day window), or FBI annual totals when no incident feed exists |
 | Weather | 30% | NWS alert severity, or wind-speed fallback when no alerts are active |
 | Infrastructure | 15% | Per-capita 311 complaint rate (complaints per 100k residents, 14-day window) |
 | Seismic | 10% | USGS earthquake magnitude within a 500 km radius |
 
-Crime and infrastructure scores are normalized by city population so the same raw
-incident count produces a proportionally higher score in a small city than in a
+The infrastructure score is normalized by city population so the same raw
+complaint count produces a proportionally higher score in a small city than in a
 large one. Supported city populations are baked in; unknown cities default to
 500,000.
+
+### Crime Index
+
+The Crime Index is **severity-weighted**, not a flat incident count, so serious
+offenses drive the score far more than low-harm reports. It is the larger of two
+signals:
+
+- **Severity-weighted volume** — incidents are weighted by type before per-capita
+  normalization (Violent Crime ×10, Weapons ×8, Theft & Burglary ×4, Vehicle ×3,
+  Drug/Fraud/Vandalism ×2, everything else ×1), keeping cities of different sizes
+  comparable.
+- **Serious-crime floor** — an absolute component (`violent × 1.8 +
+  theft/burglary × 0.5`) ensures that a meaningful raw count of violent or
+  property crime always registers as at least *Moderate*, regardless of city
+  population. For example, ~24 violent incidents in the 30-day window scores
+  *Moderate* on its own and tips into *High* once theft/burglary is added.
+
+When a city has no incident-level feed, the index falls back to **FBI Crime Data
+Explorer** annual violent- and property-crime totals, scored per capita (these
+previously always scored 0). The severity weights and floor constants live at the
+top of `utils/data_fetcher.py` (`SEVERITY_WEIGHTS`, `VIOLENT_FLOOR_PTS`,
+`PROPERTY_FLOOR_PTS`) and are easy to retune.
 
 ### Coverage
 
@@ -151,10 +173,12 @@ When an address resolves to one of the listed cities, the crime panel shows the
 incident-level map. For **any other US city**, the crime panel falls back to
 **FBI Crime Data Explorer agency aggregates**: the application looks up the law
 enforcement agency nearest to the geocoded point and shows its most recent annual
-violent-crime and property-crime totals, so the panel is no longer empty. The 311
-panel remains city-limited (empty outside the six listed cities). The incident-map
-markers and the per-capita crime score still require incident-level data and are
-therefore only populated for the listed crime cities.
+violent-crime and property-crime totals, so the panel is no longer empty. These
+annual totals also feed the Crime Index (scored per capita) so the risk score
+reflects crime even outside the incident-level cities. The 311 panel remains
+city-limited (empty outside the six listed cities), and the incident-map markers
+still require incident-level data and are therefore only populated for the listed
+crime cities.
 
 ---
 
@@ -424,7 +448,7 @@ pytest --cov=utils --cov=components
 
 | Module | Focus |
 |---|---|
-| `test_data_fetcher.py` | Geocoding, weather, NWS, FBI, Socrata crime, 311, earthquakes, per-capita risk math, and the synchronous `fetch_all` contract. |
+| `test_data_fetcher.py` | Geocoding, weather, NWS, FBI, Socrata crime, 311, earthquakes, severity-weighted crime-index math, and the synchronous `fetch_all` contract. |
 | `test_ai_analyzer.py` | Client initialization, prompt construction, the Gemini call, and the fallback briefing. |
 | `test_ui_components.py` | HTML escaping (XSS payloads), the `_safe_get` retry helper, and city detection. |
 | `test_orchestration.py` | DAG topological ordering, per-source error isolation, root-failure propagation, status transitions, timing, and the background-thread smoke test. |
