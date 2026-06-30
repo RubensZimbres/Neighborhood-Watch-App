@@ -1,41 +1,24 @@
-"""
-Multi-agent orchestration layer for NeighborhoodAlert.
-
-Turns the flat fetch+AI pipeline into an explicit DAG of named, isolated
-"subagents" that run as topological waves on a background thread:
-
-                  ┌──> weather ─────┐
-                  ├──> nws ──────────┤ (nws merges into weather["alerts"])
-    geocode  ─────┼──> crime ────────┼──> risk ──> ai_briefing
-    (root)        ├──> infra ────────┤
-                  └──> earthquakes ──┘
-
-Design notes:
-  • Pure Python (threading / concurrent.futures / dataclasses) — no new vendor.
-  • DataFetcher / AIAnalyzer are injected as *instances* (no import cycle with
-    utils.data_fetcher, which can import this module lazily).
-  • Subagent bodies are thin closures over the EXISTING DataFetcher / AIAnalyzer
-    methods — no fetch logic is reimplemented here.
-  • Per-source error isolation: a failing source is marked FAILED, its on_error
-    stub is substituted, and siblings/downstream continue (graceful degradation).
-    The root (geocode) has no stub, so a geocode failure aborts and propagates.
-  • The background thread writes ONLY to a thread-safe ProgressBoard — it never
-    touches Streamlit (`st.*` / session_state). The Streamlit main thread polls
-    board.snapshot() and re-renders.
-"""
-
-from __future__ import annotations
-
+import asyncio
 import copy
 import threading
 import time
-import concurrent.futures
-from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple
+
+from pydantic import ConfigDict
+
+from google.adk.agents import BaseAgent, ParallelAgent, SequentialAgent
+from google.adk.events import Event, EventActions
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
+from google.genai import types
 
 
 PROPAGATE = object()
+
+_APP_NAME = "neighborhood_alert"
+_USER_ID = "local"
+_SESSION_ID = "pipeline"
 
 
 class Status(str, Enum):
@@ -45,26 +28,7 @@ class Status(str, Enum):
     FAILED = "failed"
 
 
-@dataclass
-class Subagent:
-    """A named, isolated unit of work in the orchestration DAG.
-
-    body(deps)      -> result. `deps` is {dep_name: that subagent's result}.
-    on_error(deps)  -> substitute value when body raises (or a plain value, or
-                       PROPAGATE to abort the whole run).
-    """
-    name: str
-    body: Callable[[Dict[str, Any]], Any]
-    deps: Tuple[str, ...] = ()
-    on_error: Any = PROPAGATE
-
-
 class ProgressBoard:
-    """Thread-safe live status board shared between the worker thread and the UI.
-
-    Only plain dicts/strings/ints cross the thread boundary (snapshot deep-copies),
-    so the Streamlit main thread can read progress without touching worker state.
-    """
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -97,7 +61,6 @@ class ProgressBoard:
         self._done.set()
 
     def snapshot(self) -> List[dict]:
-        """Return a deep copy of the rows (plain dicts), in DAG insertion order."""
         with self._lock:
             return [copy.deepcopy(row) for row in self._rows.values()]
 
@@ -105,72 +68,47 @@ class ProgressBoard:
         return self._done.is_set()
 
     def result(self) -> Any:
-        """Return the final assembled data, or re-raise the captured exception."""
         if self._exc is not None:
             raise self._exc
         return self._final
 
 
-class Orchestrator:
-    """Runs a set of Subagents as a topologically-ordered set of parallel waves."""
+class NodeAgent(BaseAgent):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    def __init__(self, subagents: List[Subagent], board: ProgressBoard, max_workers: int = 5):
-        self.subagents: Dict[str, Subagent] = {s.name: s for s in subagents}
-        self.board = board
-        self.max_workers = max_workers
-        for s in subagents:
-            self.board.init_row(s.name, s.deps)
+    body: Any
+    node_deps: Tuple[str, ...] = ()
+    on_error: Any = PROPAGATE
+    board: Any = None
 
-    def run(self) -> Dict[str, Any]:
-        """Execute the DAG and return {name: result}. Re-raises on a PROPAGATE failure."""
-        results: Dict[str, Any] = {}
-        remaining = dict(self.subagents)
-
-        while remaining:
-            ready = [s for s in remaining.values() if all(d in results for d in s.deps)]
-            if not ready:
-                raise RuntimeError(
-                    "Orchestration deadlock — unsatisfiable dependencies among: "
-                    + ", ".join(remaining)
-                )
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as ex:
-                futures = {ex.submit(self._run_one, s, results): s for s in ready}
-                for fut in concurrent.futures.as_completed(futures):
-                    name, value, error = fut.result()
-                    if error is not None:
-                        raise error
-                    results[name] = value
-
-            for s in ready:
-                remaining.pop(s.name, None)
-
-        return results
-
-    def _run_one(self, s: Subagent, results: Dict[str, Any]):
-        """Run one subagent with status/timing tracking and error isolation."""
-        deps_data = {d: results[d] for d in s.deps}
-        self.board.update(s.name, status=Status.RUNNING.value)
+    async def _run_async_impl(self, ctx) -> AsyncGenerator[Event, None]:
+        deps_data = {d: ctx.session.state[d] for d in self.node_deps}
+        self.board.update(self.name, status=Status.RUNNING.value)
         start = time.monotonic()
         try:
-            value = s.body(deps_data)
-            self.board.update(
-                s.name, status=Status.DONE.value,
-                elapsed_ms=int((time.monotonic() - start) * 1000),
-            )
-            return (s.name, value, None)
+            value = await asyncio.to_thread(self.body, deps_data)
         except Exception as e:
             elapsed = int((time.monotonic() - start) * 1000)
-            self.board.update(s.name, status=Status.FAILED.value, elapsed_ms=elapsed, error=str(e))
-            if s.on_error is PROPAGATE:
-                return (s.name, None, e)
-            stub = s.on_error(deps_data) if callable(s.on_error) else s.on_error
-            return (s.name, stub, None)
+            self.board.update(self.name, status=Status.FAILED.value, elapsed_ms=elapsed, error=str(e))
+            if self.on_error is PROPAGATE:
+                raise
+            stub = self.on_error(deps_data) if callable(self.on_error) else self.on_error
+            yield Event(author=self.name, actions=EventActions(state_delta={self.name: stub}))
+            return
+        self.board.update(
+            self.name, status=Status.DONE.value,
+            elapsed_ms=int((time.monotonic() - start) * 1000),
+        )
+        yield Event(author=self.name, actions=EventActions(state_delta={self.name: value}))
 
+
+def _merge_alerts(weather: dict, nws: list) -> dict:
+    merged = dict(weather)
+    merged["alerts"] = nws
+    return merged
 
 
 def _core_data(deps: Dict[str, Any]) -> dict:
-    """Assemble the data dict from subagent results (nws merged into weather)."""
     weather = dict(deps["weather"])
     weather["alerts"] = deps["nws"]
     return {
@@ -183,11 +121,14 @@ def _core_data(deps: Dict[str, Any]) -> dict:
     }
 
 
-def build_pipeline(address: str, fetcher, analyzer, board: ProgressBoard) -> Tuple[List[Subagent], Callable[[Dict[str, Any]], dict]]:
-    """Construct the 8 subagents (closures over existing methods) + a final assembler.
+def assemble(state: Dict[str, Any]) -> dict:
+    data = _core_data(state)
+    data["fetched_at"] = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + "Z"
+    data["analysis"] = state.get("ai_briefing")
+    return data
 
-    Returns (subagents, assemble) where assemble({name: result}) -> final data dict.
-    """
+
+def build_pipeline(address: str, fetcher, analyzer, board: ProgressBoard) -> Tuple[BaseAgent, Callable[[Dict[str, Any]], dict]]:
 
     def geo_of(deps):
         return deps["geocode"]
@@ -195,85 +136,106 @@ def build_pipeline(address: str, fetcher, analyzer, board: ProgressBoard) -> Tup
     def city_key_of(geo) -> str:
         return fetcher._detect_city(geo.get("city", ""), geo.get("state", ""))
 
-    subagents = [
-        Subagent("geocode", lambda d: fetcher._geocode(address)),
-
-        Subagent(
-            "weather", lambda d: fetcher._fetch_weather(geo_of(d)["lat"], geo_of(d)["lon"]),
-            deps=("geocode",),
-            on_error=lambda d: fetcher._weather_stub(geo_of(d)["lat"], geo_of(d)["lon"]),
+    geocode = NodeAgent(
+        name="geocode",
+        body=lambda d: fetcher._geocode(address),
+        board=board,
+    )
+    weather = NodeAgent(
+        name="weather",
+        body=lambda d: fetcher._fetch_weather(geo_of(d)["lat"], geo_of(d)["lon"]),
+        node_deps=("geocode",),
+        on_error=lambda d: fetcher._weather_stub(geo_of(d)["lat"], geo_of(d)["lon"]),
+        board=board,
+    )
+    nws = NodeAgent(
+        name="nws",
+        body=lambda d: fetcher._fetch_nws_alerts(geo_of(d)["lat"], geo_of(d)["lon"]),
+        node_deps=("geocode",),
+        on_error=lambda d: [],
+        board=board,
+    )
+    crime = NodeAgent(
+        name="crime",
+        body=lambda d: fetcher._fetch_crime(
+            geo_of(d)["lat"], geo_of(d)["lon"], city_key_of(geo_of(d)),
+            geo_of(d).get("state", ""), geo_of(d),
         ),
-        Subagent(
-            "nws", lambda d: fetcher._fetch_nws_alerts(geo_of(d)["lat"], geo_of(d)["lon"]),
-            deps=("geocode",), on_error=lambda d: [],
+        node_deps=("geocode",),
+        on_error=lambda d: {"incidents": [], "total_count": 0, "type_counts": {},
+                            "fbi_stats": {}, "fbi_summary": {}, "period_days": 30},
+        board=board,
+    )
+    infra = NodeAgent(
+        name="infra",
+        body=lambda d: fetcher._fetch_311(geo_of(d)["lat"], geo_of(d)["lon"], city_key_of(geo_of(d))),
+        node_deps=("geocode",),
+        on_error=lambda d: {"complaints": [], "total": 0, "categories": {}},
+        board=board,
+    )
+    earthquakes = NodeAgent(
+        name="earthquakes",
+        body=lambda d: fetcher._fetch_earthquakes(geo_of(d)["lat"], geo_of(d)["lon"]),
+        node_deps=("geocode",),
+        on_error=lambda d: [],
+        board=board,
+    )
+    risk = NodeAgent(
+        name="risk",
+        body=lambda d: fetcher._compute_risk(
+            d["crime"], _merge_alerts(d["weather"], d["nws"]),
+            d["infra"], d["earthquakes"], city_key_of(d["geocode"]),
         ),
-        Subagent(
-            "crime",
-            lambda d: fetcher._fetch_crime(
-                geo_of(d)["lat"], geo_of(d)["lon"], city_key_of(geo_of(d)),
-                geo_of(d).get("state", ""), geo_of(d),
-            ),
-            deps=("geocode",),
-            on_error=lambda d: {"incidents": [], "total_count": 0, "type_counts": {},
-                                "fbi_stats": {}, "fbi_summary": {}, "period_days": 30},
-        ),
-        Subagent(
-            "infra",
-            lambda d: fetcher._fetch_311(geo_of(d)["lat"], geo_of(d)["lon"], city_key_of(geo_of(d))),
-            deps=("geocode",),
-            on_error=lambda d: {"complaints": [], "total": 0, "categories": {}},
-        ),
-        Subagent(
-            "earthquakes", lambda d: fetcher._fetch_earthquakes(geo_of(d)["lat"], geo_of(d)["lon"]),
-            deps=("geocode",), on_error=lambda d: [],
-        ),
+        node_deps=("geocode", "weather", "nws", "crime", "infra", "earthquakes"),
+        on_error=lambda d: {"overall": 0, "overall_label": "Low"},
+        board=board,
+    )
+    ai_briefing = NodeAgent(
+        name="ai_briefing",
+        body=lambda d: analyzer.analyze(_core_data(d), address),
+        node_deps=("geocode", "weather", "nws", "crime", "infra", "earthquakes", "risk"),
+        on_error=lambda d: "AI analysis unavailable.",
+        board=board,
+    )
 
-        Subagent(
-            "risk",
-            lambda d: fetcher._compute_risk(
-                d["crime"], _merge_alerts(d["weather"], d["nws"]),
-                d["infra"], d["earthquakes"], city_key_of(d["geocode"]),
-            ),
-            deps=("geocode", "weather", "nws", "crime", "infra", "earthquakes"),
-            on_error=lambda d: {"overall": 0, "overall_label": "Low"},
-        ),
+    nodes = [geocode, weather, nws, crime, infra, earthquakes, risk, ai_briefing]
+    for node in nodes:
+        board.init_row(node.name, node.node_deps)
 
-        Subagent(
-            "ai_briefing",
-            lambda d: analyzer.analyze(_core_data(d), address),
-            deps=("geocode", "weather", "nws", "crime", "infra", "earthquakes", "risk"),
-            on_error=lambda d: "AI analysis unavailable.",
-        ),
-    ]
-
-    def assemble(results: Dict[str, Any]) -> dict:
-        data = _core_data(results)
-        data["fetched_at"] = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + "Z"
-        data["analysis"] = results.get("ai_briefing")
-        return data
-
-    return subagents, assemble
+    sources = ParallelAgent(name="sources", sub_agents=[weather, nws, crime, infra, earthquakes])
+    root = SequentialAgent(name="pipeline", sub_agents=[geocode, sources, risk, ai_briefing])
+    return root, assemble
 
 
-def _merge_alerts(weather: dict, nws: list) -> dict:
-    merged = dict(weather)
-    merged["alerts"] = nws
-    return merged
+async def _drive(root: BaseAgent) -> Dict[str, Any]:
+    session_service = InMemorySessionService()
+    await session_service.create_session(
+        app_name=_APP_NAME, user_id=_USER_ID, session_id=_SESSION_ID,
+    )
+    runner = Runner(app_name=_APP_NAME, agent=root, session_service=session_service)
+    message = types.Content(role="user", parts=[types.Part.from_text(text="run")])
+    async for _event in runner.run_async(
+        user_id=_USER_ID, session_id=_SESSION_ID, new_message=message,
+    ):
+        pass
+    session = await session_service.get_session(
+        app_name=_APP_NAME, user_id=_USER_ID, session_id=_SESSION_ID,
+    )
+    return dict(session.state)
+
+
+def run_pipeline(root: BaseAgent) -> Dict[str, Any]:
+    return asyncio.run(_drive(root))
 
 
 def start_pipeline(address: str, fetcher, analyzer) -> ProgressBoard:
-    """Non-blocking entry point: start the DAG on a daemon thread, return the board.
-
-    The caller (Streamlit) polls board.snapshot()/is_done() and reads board.result()
-    once done. The worker thread never touches Streamlit.
-    """
     board = ProgressBoard()
-    subagents, assemble = build_pipeline(address, fetcher, analyzer, board)
-    orchestrator = Orchestrator(subagents, board)
+    root, assemble_fn = build_pipeline(address, fetcher, analyzer, board)
 
     def _runner():
         try:
-            board.set_result(assemble(orchestrator.run()))
+            state = run_pipeline(root)
+            board.set_result(assemble_fn(state))
         except Exception as e:
             board.set_error(e)
 

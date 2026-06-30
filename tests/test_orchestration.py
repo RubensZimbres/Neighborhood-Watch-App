@@ -1,18 +1,3 @@
-"""
-Tests for utils/orchestration.py — the multi-agent orchestration layer.
-
-Covers:
-  - DAG ordering: risk runs after all 5 sources, ai_briefing runs last
-  - Per-source error isolation: a failing source is FAILED + stubbed, siblings DONE
-  - Root failure: geocode raising aborts the run and leaves downstream QUEUED
-  - Status transitions: QUEUED → RUNNING → DONE/FAILED, elapsed_ms recorded
-  - ProgressBoard thread-safety smoke test via start_pipeline (real daemon thread)
-  - AI node failure isolation
-
-Style mirrors tests/test_data_fetcher.py: stdlib unittest.mock (patch.object),
-conftest fixtures, no monkeypatch.
-"""
-
 import sys
 import os
 import time
@@ -23,14 +8,16 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from google.adk.agents import SequentialAgent, ParallelAgent
+
 from utils.data_fetcher import DataFetcher
 from utils.ai_analyzer import AIAnalyzer
 from utils.orchestration import (
     Status,
-    Subagent,
+    NodeAgent,
     ProgressBoard,
-    Orchestrator,
     build_pipeline,
+    run_pipeline,
     start_pipeline,
     PROPAGATE,
 )
@@ -40,15 +27,18 @@ ALL_KEYS = {"geo", "weather", "crime", "infrastructure",
 
 
 def _run_sync(fetcher, analyzer, address="Chicago, IL"):
-    """Run the pipeline synchronously (no thread) and return (data, board)."""
     board = ProgressBoard()
-    subs, assemble = build_pipeline(address, fetcher, analyzer, board)
-    results = Orchestrator(subs, board).run()
-    return assemble(results), board
+    root, assemble_fn = build_pipeline(address, fetcher, analyzer, board)
+    state = run_pipeline(root)
+    return assemble_fn(state), board
 
 
 def _rows_by_name(board):
     return {r["name"]: r for r in board.snapshot()}
+
+
+def _node(name, body, deps=(), on_error=PROPAGATE, board=None):
+    return NodeAgent(name=name, body=body, node_deps=deps, on_error=on_error, board=board)
 
 
 
@@ -75,53 +65,65 @@ class TestProgressBoard:
 
 
 
-class TestOrchestratorGeneric:
+class TestNodeAgentGeneric:
     def test_runs_in_topological_order(self):
-        order = []
-        subs = [
-            Subagent("a", lambda d: order.append("a") or "A"),
-            Subagent("b", lambda d: order.append("b") or "B", deps=("a",)),
-            Subagent("c", lambda d: order.append("c") or "C", deps=("b",)),
-        ]
         board = ProgressBoard()
-        results = Orchestrator(subs, board).run()
-        assert results == {"a": "A", "b": "B", "c": "C"}
+        order = []
+        a = _node("a", lambda d: order.append("a") or "A", board=board)
+        b = _node("b", lambda d: order.append("b") or "B", deps=("a",), board=board)
+        c = _node("c", lambda d: order.append("c") or "C", deps=("b",), board=board)
+        root = SequentialAgent(name="r", sub_agents=[a, b, c])
+
+        state = run_pipeline(root)
+        assert state == {"a": "A", "b": "B", "c": "C"}
         assert order == ["a", "b", "c"]
 
     def test_deps_data_passed_to_body(self):
+        board = ProgressBoard()
         captured = {}
-        subs = [
-            Subagent("a", lambda d: 41),
-            Subagent("b", lambda d: captured.update(d) or d["a"] + 1, deps=("a",)),
-        ]
-        Orchestrator(subs, ProgressBoard()).run()
+        a = _node("a", lambda d: 41, board=board)
+        b = _node("b", lambda d: captured.update(d) or d["a"] + 1, deps=("a",), board=board)
+        run_pipeline(SequentialAgent(name="r", sub_agents=[a, b]))
         assert captured == {"a": 41}
 
     def test_stub_substituted_on_failure(self):
         def boom(d):
             raise RuntimeError("nope")
-        subs = [
-            Subagent("a", boom, on_error=lambda d: "STUB"),
-            Subagent("b", lambda d: d["a"] + "!", deps=("a",)),
-        ]
         board = ProgressBoard()
-        results = Orchestrator(subs, board).run()
-        assert results["b"] == "STUB!"
+        board.init_row("a", ())
+        board.init_row("b", ("a",))
+        a = _node("a", boom, on_error=lambda d: "STUB", board=board)
+        b = _node("b", lambda d: d["a"] + "!", deps=("a",), board=board)
+
+        state = run_pipeline(SequentialAgent(name="r", sub_agents=[a, b]))
+        assert state["b"] == "STUB!"
         assert _rows_by_name(board)["a"]["status"] == Status.FAILED.value
 
     def test_propagate_node_aborts_run(self):
         def boom(d):
             raise ValueError("fatal")
-        subs = [
-            Subagent("a", boom, on_error=PROPAGATE),
-            Subagent("b", lambda d: "B", deps=("a",)),
-        ]
         board = ProgressBoard()
+        board.init_row("a", ())
+        board.init_row("b", ("a",))
+        a = _node("a", boom, on_error=PROPAGATE, board=board)
+        b = _node("b", lambda d: "B", deps=("a",), board=board)
+
         with pytest.raises(ValueError, match="fatal"):
-            Orchestrator(subs, board).run()
+            run_pipeline(SequentialAgent(name="r", sub_agents=[a, b]))
         rows = _rows_by_name(board)
         assert rows["a"]["status"] == Status.FAILED.value
         assert rows["b"]["status"] == Status.QUEUED.value
+
+    def test_parallel_children_share_state(self):
+        board = ProgressBoard()
+        root_node = _node("root", lambda d: {"v": 7}, board=board)
+        left = _node("left", lambda d: d["root"]["v"] + 1, deps=("root",), board=board)
+        right = _node("right", lambda d: d["root"]["v"] + 2, deps=("root",), board=board)
+        merge = _node("merge", lambda d: d["left"] + d["right"],
+                      deps=("root", "left", "right"), board=board)
+        sources = ParallelAgent(name="s", sub_agents=[left, right])
+        state = run_pipeline(SequentialAgent(name="r", sub_agents=[root_node, sources, merge]))
+        assert state["merge"] == 17
 
 
 
@@ -244,7 +246,7 @@ class TestErrorIsolation:
         assert set(data.keys()) == ALL_KEYS
         assert data["analysis"] == "briefing"
 
-    @patch.object(AIAnalyzer, "analyze", side_effect=RuntimeError("gemini down"))
+    @patch.object(AIAnalyzer, "analyze", side_effect=RuntimeError("model down"))
     @patch.object(DataFetcher, "_compute_risk", return_value={"overall": 0, "overall_label": "Low"})
     @patch.object(DataFetcher, "_fetch_earthquakes", return_value=[])
     @patch.object(DataFetcher, "_fetch_311")
@@ -275,9 +277,9 @@ class TestRootFailure:
         mock_geo.side_effect = ValueError("Could not geocode: xyz")
 
         board = ProgressBoard()
-        subs, _ = build_pipeline("xyz", DataFetcher(), AIAnalyzer(), board)
+        root, _ = build_pipeline("xyz", DataFetcher(), AIAnalyzer(), board)
         with pytest.raises(ValueError, match="Could not geocode"):
-            Orchestrator(subs, board).run()
+            run_pipeline(root)
 
         rows = _rows_by_name(board)
         assert rows["geocode"]["status"] == Status.FAILED.value
@@ -311,7 +313,6 @@ class TestStatusTransitions:
             assert r["elapsed_ms"] >= 0
 
     def test_running_status_observable_mid_flight(self):
-        """A blocked subagent shows RUNNING in the snapshot while it executes."""
         started = threading.Event()
         release = threading.Event()
 
@@ -320,10 +321,12 @@ class TestStatusTransitions:
             release.wait(2)
             return "done"
 
-        subs = [Subagent("slow", slow)]
         board = ProgressBoard()
-        orch = Orchestrator(subs, board)
-        t = threading.Thread(target=orch.run, daemon=True)
+        board.init_row("slow", ())
+        node = _node("slow", slow, board=board)
+        root = SequentialAgent(name="r", sub_agents=[node])
+
+        t = threading.Thread(target=run_pipeline, args=(root,), daemon=True)
         t.start()
         try:
             assert started.wait(2)

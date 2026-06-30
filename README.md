@@ -8,8 +8,8 @@ composite risk score, and runs the aggregated picture through Google Gemini to
 produce an actionable safety briefing.
 
 The data pipeline is built as a **multi-agent orchestration layer**: each data
-source is an isolated subagent in a dependency graph, the graph runs on a
-background thread, and the Streamlit UI streams live per-subagent progress while
+source is an isolated Google ADK agent in a dependency graph, the graph runs on a
+background thread, and the Streamlit UI streams live per-agent progress while
 the work executes.
 
 ---
@@ -41,7 +41,7 @@ the work executes.
                                   |
                        background daemon thread
                                   |
-                          Orchestrator.run()
+                    ADK Runner (SequentialAgent)
                                   |
         +----------+----------+----------+----------+-----------+
         |          |          |          |          |           |
@@ -63,25 +63,25 @@ The application has two execution paths over the same underlying fetch methods:
 - **Synchronous path** (`DataFetcher.fetch_all`): geocode, then a 5-way parallel
   fan-out, then risk scoring. Used by tests and any non-UI caller.
 - **Orchestrated path** (`utils/orchestration.start_pipeline`): the same fetches
-  wrapped as subagents in a dependency graph, executed on a background thread
-  with live progress and the AI briefing as the final node. Used by the UI.
+  wrapped as Google ADK agents in a dependency graph, executed on a background
+  thread with live progress and the AI briefing as the final node. Used by the UI.
 
 ---
 
 ## Multi-Agent Orchestration Layer
 
 `utils/orchestration.py` turns the flat fetch-and-analyze flow into an explicit
-directed acyclic graph (DAG) of named, isolated subagents.
+directed acyclic graph (DAG) of named, isolated Google ADK agents.
 
 ### Core abstractions
 
 | Component | Responsibility |
 |---|---|
-| `Subagent` | A named unit of work: a callable `body(deps)`, its declared `deps`, and an `on_error` policy (a stub value, a stub factory, or `PROPAGATE` to abort). |
-| `Orchestrator` | Runs subagents as topological waves. Each wave executes in a thread pool; failures are isolated per node. |
+| `NodeAgent` | A custom ADK `BaseAgent`: a callable `body(deps)`, its declared `node_deps`, and an `on_error` policy (a stub value, a stub factory, or `PROPAGATE` to abort). It reads its dependencies from session state, runs the blocking fetch in a worker thread, and writes its result back as a state delta. |
+| `ParallelAgent` / `SequentialAgent` | ADK workflow agents that compose the nodes: the five data sources run under a `ParallelAgent`, wrapped by a top-level `SequentialAgent` of geocode → sources → risk → ai_briefing. |
 | `ProgressBoard` | A thread-safe status board. The worker thread writes only here; the UI reads deep-copied plain-dict snapshots. |
-| `build_pipeline` | Constructs the 8 subagents as thin closures over existing `DataFetcher` / `AIAnalyzer` methods, plus the final assembler. |
-| `start_pipeline` | Non-blocking entry point: starts the DAG on a daemon thread and returns the `ProgressBoard` immediately. |
+| `build_pipeline` | Constructs the 8 nodes as thin closures over existing `DataFetcher` / `AIAnalyzer` methods and assembles the ADK agent tree, plus the final assembler. |
+| `start_pipeline` | Non-blocking entry point: drives the ADK `Runner` on a daemon thread and returns the `ProgressBoard` immediately. |
 
 ### The pipeline graph
 
@@ -98,7 +98,7 @@ ai_briefing   (depends on risk; calls Gemini; stub: "AI analysis unavailable.")
 
 ### Design properties
 
-- **Per-source error isolation.** If a data source raises, its subagent is marked
+- **Per-source error isolation.** If a data source raises, its agent is marked
   `failed`, its `on_error` stub is substituted, and siblings and downstream nodes
   continue. One flaky API never crashes the dashboard.
 - **Root failure propagation.** The `geocode` root has no stub. If geocoding fails
@@ -315,7 +315,7 @@ Per-city 311 service-request datasets. Same optional `SOCRATA_APP_TOKEN` auth.
 ├── utils/
 │   ├── data_fetcher.py          DataFetcher: geocoding + all external data sources
 │   ├── ai_analyzer.py           AIAnalyzer: Gemini prompt building and call
-│   └── orchestration.py         Subagent / Orchestrator / ProgressBoard / pipeline
+│   └── orchestration.py         NodeAgent / ADK agent tree / ProgressBoard / pipeline
 ├── components/
 │   └── ui_components.py         Render functions, CSS, and the live agent trace
 ├── tests/
@@ -410,7 +410,7 @@ streamlit run app.py
 
 The app opens at http://localhost:8501. Enter any US address and click Analyze.
 The agent orchestration trace appears immediately and updates live as each
-subagent completes; the AI briefing renders as the final step.
+agent completes; the AI briefing renders as the final step.
 
 ### Environment variables
 

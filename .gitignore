@@ -6,3 +6,12 @@ venv/
 .pytest_cache/
 .benchmarks/
 __pycache__/
+.agents/
+GEMINI.md
+AGENTS.md
+PLAN.md
+DATA_SCIENCE.md
+SESSION_ASYNC.md
+INSTRUCTIONS.md
+settings.json
+state.json
