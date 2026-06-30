@@ -353,7 +353,7 @@ class DataFetcher:
             r = self._safe_get(url, params=params, headers=headers, timeout=12)
             r.raise_for_status()
             raw = r.json()
-            
+
             # If the 30-day filter returned no data (often due to city data delays), fetch the latest available
             if not raw and "$where" in params:
                 del params["$where"]
@@ -361,7 +361,7 @@ class DataFetcher:
                 r = self._safe_get(url, params=params, headers=headers, timeout=12)
                 r.raise_for_status()
                 raw = r.json()
-                
+
         except Exception as e:
             logger.warning("[Socrata:%s] crime fetch failed: %s", city_key, e)
             return []
@@ -395,7 +395,7 @@ class DataFetcher:
             )
             if not isinstance(raw_type, str) or not raw_type.strip():
                 raw_type = "Unknown"
-            
+
             raw_type_upper = raw_type.upper()
             if any(x in raw_type_upper for x in ["THEFT", "BURGLARY", "LARCENY", "ROBBERY"]):
                 norm_type = "Theft & Burglary"
